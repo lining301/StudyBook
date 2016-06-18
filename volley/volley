@@ -1,0 +1,167 @@
+
+Volley 的特点：特别适合数据量小，通信频繁的网络操作。
+
+
+
+
+3. Volley中DiskBasedCache初始化非常慢的问题。 initialize方法中，遍历所有的缓存文件，读取头信息存入map中，当缓存文件非常多的时候，google提供的初始化实现，耗费了10s以上的时间,每次newRequestQueue，都需要等待十秒的时间才能开始处理request。
+有两个优化方案。
+ （1） 有人在stackoverflow中提到过这个问题，然后他给出了解决方案。在initialize中，给FileOutputStream在套一层BufferedOutputStream。本人测试过，速度有十倍的提升。基本能控制初始化的时间在1-3s。
+ （2） 提前初始化。每一次newRequestQueue都要花费这么长时间初始化，但是实际使用中，我们需要new那么多RequestQueue吗？看源代码可以知道，每个RequestQueue实际启动了5个循环线程来调度各种请求。其中四个用来处理网络请求，一个用来处理cache请求。对于一个app来说，这样已经足够，我们没必要每个页面都启动一个RequestQueue。因此，我把RequestQueue设置为单例，在Application中初始化，这样就可以避免initialize被反复调用，同时也能在界面出来之前，预先准备好数据
+
+
+
+ HttpURLConnection和HttpClient的简单比较
+1.功能用法
+
+1、从功能上对比，HttpClient库要丰富很多，提供了很多工具，封装了http的请求头，参数，内容体，响应，还有一些高级功能，代理、COOKIE、鉴权、压缩、连接池的处理。
+
+2、HttpClient高级功能代码写起来比较复杂，对开发人员的要求会高一些，而HttpURLConnection对大部分工作进行了包装，屏蔽了不需要的细节，适合开发人员直接调用。
+
+3、HttpURLConnection在2.3版本增加了一些HTTPS方面的改进，4.0版本增加一些响应的缓存。
+
+2.性能
+
+1、HttpUrlConnection直接支持GZIP压缩；HttpClient也支持，但要自己写代码处理。
+
+2、HttpUrlConnection直接支持系统级连接池，即打开的连接不会直接关闭，在一段时间内所有程序可共用；HttpClient当然也能做到，但毕竟不如官方直接系统底层支持好。
+
+3、HttpUrlConnection直接在系统层面做了缓存策略处理（4.0版本以上），加快了重复请求的速度。
+
+4、关于速度方面，网上有些大牛做过测试，但因访问站点的数据量，二次连接访问等发现测试结果并不统一，故不做详述。大体来说相差不是很大。
+
+3.选用
+
+1、如果一个Android应用需要向指定页面发送请求，但该页面并不是一个简单的页面，只有当用户已经登录，而且登录用户的用户名有效时才可访问该页面。如果使用HttpURLConnection来访问这个被保护的页面，那么需要处理的细节就太复杂了。可使用HttpClient来登录系统，只要应用程序使用同一个HttpClient发送请求，HttpClient会自动维护与服务器之间的Session状态，也就是说程序第一次使用HttpClient登录系统后，接下来使用HttpClient即可访问被保护页而了。这种情况建议使用HttpClient。
+
+2、Android2.3及以上版本建议选用HttpURLConnection，2.2及以下版本建议选用HttpClient，因为貌似2.2下有些小bug，不知现在修复好没有，但是目前4.0以上版本覆盖率达89%了，这点应该问题不大。而且api体积小使用更简单，内存处理方面更适合移动设备，官方也更支持HttpURLClient，想必后续官方会更完善这个，新手或者新的应用都建议使用HttpURLConnection。
+
+实例：
+
+RequestQueue mRequestQueue =  Volley.newRequestQueue(this);  
+
+JsonObjectRequest jr = new JsonObjectRequest(Request.Method.GET,url,null,new Response.Listener<JSONObject>() {  
+            @Override  
+            public void onResponse(JSONObject response) {  
+                parseJSON(response);  
+            }  
+        },new Response.ErrorListener() {  
+            @Override  
+            public void onErrorResponse(VolleyError error) {  
+                Log.i(TAG,error.getMessage());  
+            }  
+        });  
+mRequestQueue.add(jr);  
+
+RequestQueue创建后，1个CacheDispatcher缓存处理线程,4个NetworkDispatcher网络请求线程start了。线程优先级是相同的（background）
+
+RequestQueue.add的时候，都会添加到mCurrentRequests hashSet中，用于cancelAll操作。不需要缓存的直接添加到mNetworkQueue，由NetworkDispatcher遍历执行。需要缓存的添加到mWaitingRequests HashMap中，判断是不是重复添加，没有添加过的再添加到mCacheQueue，由CacheDispatcher遍历查找本地缓存，如果缓存过期，再添加到mNetworkQueue请求网络数据。
+
+
+ResponseDelivery Executor（handle MainLooper）
+postResponse(Request<?> request, Response<?> response);
+postError(Request<?> request, VolleyError error);
+
+
+
+创建request请求：
+setShouldCache（）
+设置RetryPolicy（可自定义），
+设置cancle。两个地方起作用：1.请求网络之前。2.请求完数据后，不delivery到界面。
+
+Volley提供
+JsonRequest
+JsonArrayRequest
+ImageRequest
+StringRequest
+自定义request
+
+
+一～缓存：
+volley初始化时可以设置缓存大小。
+缓存目录默认为new File(context.getCacheDir(), DEFAULT_CACHE_DIR/*volley*/)
+使用LinkedHashMap<String, CacheHeader>(16, .75f, true);保存缓存的文件信息。
+
+public CacheHeader(String key, Entry entry) {
+            this.key = key;
+            this.size = entry.data.length;
+            this.etag = entry.etag;
+            this.serverDate = entry.serverDate;
+            this.lastModified = entry.lastModified;
+            this.ttl = entry.ttl;
+            this.softTtl = entry.softTtl;
+            this.responseHeaders = entry.responseHeaders;
+Cache.Entry entry = new Cache.Entry();
+        entry.data = response.data;CacheHeader中没有data。
+        entry.etag = serverEtag;
+        entry.softTtl = softExpire;
+        entry.ttl = finalExpire;
+        entry.serverDate = serverDate;
+        entry.lastModified = lastModified;
+        entry.responseHeaders = headers;
+
+
+初始化后，处理cache的thread就会start，首先initial()缓存：遍历缓存目录，将缓存文件的头信息CacheHeader放到LinkedHashMap中（先缓存到本地的文件先放进来，到时空间超过5M时，先被删除），缓存文件的唯一标示是：请求方式get/post+url。(这里可能比较耗时，所以简易在应用初始化的时候初始化volley，一般只需初始化一个请求队列)
+CacheHeader中下面这两个变量判读文件是否过期，缓存文件再次被使用时使用。是从httpheader中获取的。
+public long ttl;过期，直接请求，请求后显示。
+public long softTtl;过期，先显示，后面请求到再刷新。
+
+保存了httpHeader中的下列属性：
+"Date"
+"Cache-Control"="no-cache"/"no-store"/"max-age="/"stale-while-revalidate="/"must-revalidate"/"proxy-revalidate"
+"Expires"
+"Last-Modified"
+"ETag"
+
+文件头信息和文件具体数据保存到同一文件中。按照一定的格式先文件头信息先保存，然后保存具体数据。读取时，再按照特定的格式读取。
+
+ClearCacheRequest.isCanceled(){cache.clear();清空cache}
+
+
+二～网络请求：BasicNetwork
+底层调用的两种基本的网络请求 HttpClient/HttpUrlConnection implements HttpStack。
+Android5.0以前的系统，可以自定义使用OkHttp implements HttpStack即可。
+
+
+
+BasicNetwork功能：
+1.根据返回的结果status 简单处理：>299/<200 new IOException。或者如果301/302，根据location重定向。
+
+2.重试机制：SocketTimeoutException/ConnectTimeoutException/IOException（内容不完整）
+ DefaultRetryPolicy implements RetryPolicy。可设置 重试次数，timeOut时间。float mBackoffMultiplier × defaultTimeOut 下次timeOut时间。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
